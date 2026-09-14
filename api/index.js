@@ -7,7 +7,7 @@ import { makeZip } from "../lib/zip.js";
 
 dotenv.config();
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __dirname = process.cwd();
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SOURCE = (process.env.DATA_SOURCE || "mock").toLowerCase();
@@ -47,7 +47,7 @@ app.use(express.json({ limit: "1mb" }));
 
 // Serve the dashboard (the browser only ever talks to THIS server, never to
 // the data provider directly — so your API key never leaves the machine).
-app.use(express.static(path.join(__dirname, "..", "public")));
+app.use(express.static(path.join(__dirname, "public")));
 
 // Pick the data source. Each adapter exposes the same scout() function so the
 // rest of the app doesn't care which provider is behind it.
