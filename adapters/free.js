@@ -3,13 +3,13 @@
 //   Android : google-play-scraper   (reads the public Play Store pages)
 //   iOS     : app-store-scraper     (Apple's public iTunes search/lookup)
 //
-// What you DO get: the seed game, its competitor list, icons, screenshots,
-// ratings, review counts, install bands, category, developer, dates, IAP and
-// ad-supported flags.
+// What you DO get: the seed game, its competitors, icons, screenshots,
+// ratings, review counts, install counts, category rank, developer, dates,
+// IAP and ad-supported flags.
 //
 // What you DON'T get: downloads/month, downloads/day and revenue estimates.
 // Those are modelled numbers, not public data, so no free source has them -
-// the dashboard simply hides those tiles when they're absent.
+// the dashboard hides those tiles rather than showing a guess.
 
 import gplayPkg from "google-play-scraper";
 import istorePkg from "app-store-scraper";
@@ -112,6 +112,50 @@ function relevance(candidate, wantWords, seedGenres) {
   return score;
 }
 
+// --------------------------------------------------------- category ranks
+
+// Real category rank, read off the live top-free chart for the seed's own
+// category. Only charting games get a number - everyone else genuinely has
+// no rank, so the tile stays empty rather than showing a guess.
+async function playRankMap(genreId) {
+  if (!genreId || !/^GAME/i.test(String(genreId))) return new Map();
+  try {
+    const chart = await gplay.list({
+      collection: gplay.collection.TOP_FREE,
+      category: String(genreId),
+      num: 200,
+      country: COUNTRY,
+      lang: LANG,
+      throttle: THROTTLE,
+    });
+    return new Map(chart.map((a, i) => [a.appId, i + 1]));
+  } catch {
+    return new Map();
+  }
+}
+
+async function iosRankMap(genreIds) {
+  // 6014 is the catch-all "Games" id; the sub-genre chart is the useful one.
+  const sub = (genreIds || []).map(String).find((g) => g && g !== "6014");
+  if (!sub) return new Map();
+  try {
+    const chart = await istore.list({
+      collection: istore.collection.TOP_FREE_IOS,
+      category: Number(sub),
+      num: 200,
+      country: COUNTRY,
+    });
+    return new Map(chart.map((a, i) => [String(a.id), i + 1]));
+  } catch {
+    return new Map();
+  }
+}
+
+function applyRanks(ranks, seed, competitors) {
+  seed.rank = ranks.get(seed.appId) ?? null;
+  for (const c of competitors) c.rank = ranks.get(c.appId) ?? null;
+}
+
 // ------------------------------------------------------- shape normalizers
 
 const EMPTY_ESTIMATES = {
@@ -140,8 +184,15 @@ function normalizePlay(a, isSeed = false) {
     ratingsCount: a.ratings != null ? Number(a.ratings) : null,
     reviewCount: a.reviews != null ? Number(a.reviews) : null,
 
-    installsNum: a.minInstalls != null ? Number(a.minInstalls) : null,
-    installsLabel: a.installs || null,
+    // Play publishes a near-exact count (maxInstalls) next to the
+    // "10,000,000+" band; prefer the real number when it is there.
+    installsNum:
+      a.maxInstalls != null ? Number(a.maxInstalls)
+      : a.minInstalls != null ? Number(a.minInstalls)
+      : null,
+    installsLabel:
+      a.maxInstalls != null ? Number(a.maxInstalls).toLocaleString("en-US")
+      : (a.installs || null),
 
     category: titleCase(a.genre || ""),
     categoryType: /game/i.test(a.genreId || a.genre || "") ? "GAME" : "APP",
@@ -255,11 +306,16 @@ async function scoutAndroid({ game, max, deadline }) {
     .map((r) => normalizePlay(r.raw, false));
 
   // Search/similar results carry no installs or screenshots - fetch the real
-  // page for each until the time budget runs out.
-  await mapLimit(competitors, 6, deadline, async (c) => {
-    const full = await gplay.app({ appId: c.appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
-    Object.assign(c, normalizePlay(full, false));
-  });
+  // page for each until the time budget runs out. The category chart is
+  // pulled alongside it, so it costs no extra wall-clock.
+  const [ranks] = await Promise.all([
+    playRankMap(seedRaw.genreId),
+    mapLimit(competitors, 6, deadline, async (c) => {
+      const full = await gplay.app({ appId: c.appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
+      Object.assign(c, normalizePlay(full, false));
+    }),
+  ]);
+  applyRanks(ranks, seed, competitors);
 
   competitors.sort((a, b) => (b.installsNum ?? -1) - (a.installsNum ?? -1));
   return { seed, competitors };
@@ -309,6 +365,8 @@ async function scoutIos({ game, max }) {
     .sort((a, b) => (b.score - a.score) || ((b.raw.reviews ?? 0) - (a.raw.reviews ?? 0)))
     .slice(0, max)
     .map((r) => normalizeIos(r.raw, false));
+
+  applyRanks(await iosRankMap(seedRaw.genreIds), seed, competitors);
 
   return { seed, competitors };
 }
