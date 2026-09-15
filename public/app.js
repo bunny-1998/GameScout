@@ -53,6 +53,7 @@ async function scout() {
     if (!res.ok) throw new Error((data.error || "Request failed") + (data.detail ? " — " + data.detail : ""));
     current = data;
     render();
+    hydrate();
   } catch (err) {
     gridEl.innerHTML = "";
     seedEl.hidden = true;
@@ -121,7 +122,7 @@ function card(a) {
   const hasAssets = a.icon || (a.screenshots && a.screenshots.length);
 
   return `
-    <article class="card">
+    <article class="card" data-app-id="${esc(a.appId)}">
       <div class="card__head">
         ${imgOrArt(a, "card__icon", 56)}
         <div class="card__headmeta">
