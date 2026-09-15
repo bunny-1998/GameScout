@@ -1,0 +1,273 @@
+// Free adapter - no API key, no credits, no account.
+//
+//   Android : google-play-scraper   (reads the public Play Store pages)
+//   iOS     : app-store-scraper     (Apple's public iTunes search/lookup)
+//
+// What you DO get: the seed game, its competitor list, icons, screenshots,
+// ratings, review counts, install bands, category, developer, dates, IAP and
+// ad-supported flags.
+//
+// What you DON'T get: downloads/month, downloads/day and revenue estimates.
+// Those are modelled numbers, not public data, so no free source has them -
+// the dashboard simply hides those tiles when they're absent.
+
+import gplayPkg from "google-play-scraper";
+import istorePkg from "app-store-scraper";
+
+const gplay = gplayPkg.default || gplayPkg;
+const istore = istorePkg.default || istorePkg;
+
+const COUNTRY = (process.env.APP_COUNTRY || "US").toLowerCase();
+const LANG = (process.env.APP_LANGUAGE || "en_US").split(/[_-]/)[0].toLowerCase();
+
+// Play Store bans an IP for ~1 hour if you hammer it, so cap requests/second.
+const THROTTLE = Number(process.env.SCRAPE_THROTTLE || 8);
+// Serverless functions get killed at 10s, so stop enriching before that.
+const BUDGET_MS = Number(process.env.SCRAPE_BUDGET_MS || 6500);
+
+// ---------------------------------------------------------------- helpers
+
+function daysSince(dateish) {
+  if (!dateish) return null;
+  const d = new Date(dateish);
+  if (isNaN(d)) return null;
+  return Math.max(0, Math.round((Date.now() - d.getTime()) / 86400000));
+}
+
+function isoDay(dateish) {
+  if (!dateish) return "";
+  const d = new Date(dateish);
+  return isNaN(d) ? String(dateish).slice(0, 10) : d.toISOString().slice(0, 10);
+}
+
+function humanSize(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const mb = n / (1024 * 1024);
+  return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : Math.round(mb) + " MB";
+}
+
+function titleCase(s) {
+  return String(s || "")
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+// "Ball Connect Puzzle: Link Dots" -> "Ball Connect"
+function keywordFrom(title) {
+  const head = String(title || "")
+    .split(/[:\-|]/)[0]
+    .replace(/[^\p{L}\p{N} ]+/gu, " ")
+    .trim();
+  const words = head.split(/\s+/).filter(Boolean);
+  return words.slice(0, 2).join(" ") || String(title || "").trim();
+}
+
+// Run tasks with a concurrency cap AND a wall-clock deadline: whatever hasn't
+// finished by the deadline is simply skipped, so we always return something.
+async function mapLimit(items, limit, deadline, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length && Date.now() < deadline) {
+      const idx = i++;
+      try { await fn(items[idx], idx); } catch { /* keep the basic card */ }
+    }
+  });
+  await Promise.all(workers);
+}
+
+// ------------------------------------------------------- shape normalizers
+
+const EMPTY_ESTIMATES = {
+  downloadsMonth: null,
+  downloadsDaily: null,
+  downloadsLifetime: null,
+  revenueMonth: null,
+  revenueLifetime: null,
+  rank: null,
+  adNetworks: [],
+  urlSpy: "",
+};
+
+function normalizePlay(a, isSeed = false) {
+  return {
+    appId: a.appId || "",
+    bundle: a.appId || "",
+    title: a.title || "Unknown",
+    developer: a.developer || "",
+    developerId: a.developerId ? String(a.developerId) : "",
+    platform: "android",
+    icon: a.icon || null,
+    screenshots: Array.isArray(a.screenshots) ? a.screenshots : [],
+
+    rating: a.score != null ? Number(a.score) : null,
+    ratingsCount: a.ratings != null ? Number(a.ratings) : null,
+    reviewCount: a.reviews != null ? Number(a.reviews) : null,
+
+    installsNum: a.minInstalls != null ? Number(a.minInstalls) : null,
+    installsLabel: a.installs || null,
+
+    category: titleCase(a.genre || ""),
+    categoryType: /game/i.test(a.genreId || a.genre || "") ? "GAME" : "APP",
+
+    version: a.version && a.version !== "VARY" ? a.version : "",
+    size: "",
+    description: (a.summary || a.description || "").slice(0, 600),
+    whatsnew: (a.recentChanges || "").replace(/<[^>]+>/g, " ").slice(0, 400),
+
+    released: isoDay(a.released),
+    updated: isoDay(a.updated),
+    ageDays: daysSince(a.released),
+
+    iap: !!a.offersIAP,
+    advertised: !!a.adSupported,
+    country: "",
+    seller: a.developer || "",
+
+    url: a.url || (a.appId ? `https://play.google.com/store/apps/details?id=${a.appId}` : ""),
+    isSeed,
+    ...EMPTY_ESTIMATES,
+  };
+}
+
+function normalizeIos(a, isSeed = false) {
+  return {
+    appId: String(a.id || ""),
+    bundle: a.appId || "",
+    title: a.title || "Unknown",
+    developer: a.developer || "",
+    developerId: a.developerId ? String(a.developerId) : "",
+    platform: "ios",
+    icon: a.icon || null,
+    screenshots: Array.isArray(a.screenshots) ? a.screenshots : [],
+
+    rating: a.score != null ? Number(a.score) : null,
+    ratingsCount: a.reviews != null ? Number(a.reviews) : null,
+    reviewCount: a.reviews != null ? Number(a.reviews) : null,
+
+    installsNum: null,
+    installsLabel: null,
+
+    category: a.primaryGenre || "",
+    categoryType: /game/i.test(a.primaryGenre || "") ? "GAME" : "APP",
+
+    version: a.version || "",
+    size: humanSize(a.size),
+    description: (a.description || "").slice(0, 600),
+    whatsnew: (a.releaseNotes || "").slice(0, 400),
+
+    released: isoDay(a.released),
+    updated: isoDay(a.updated),
+    ageDays: daysSince(a.released),
+
+    iap: false,
+    advertised: false,
+    country: "",
+    seller: a.developer || "",
+
+    url: a.url || "",
+    isSeed,
+    ...EMPTY_ESTIMATES,
+  };
+}
+
+// ------------------------------------------------------------- Android run
+
+async function scoutAndroid({ game, max, deadline }) {
+  const looksLikeBundle = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/i.test(game.trim());
+
+  let seedRaw;
+  if (looksLikeBundle) {
+    seedRaw = await gplay.app({ appId: game.trim(), country: COUNTRY, lang: LANG, throttle: THROTTLE });
+  } else {
+    const hits = await gplay.search({ term: game, num: 5, country: COUNTRY, lang: LANG, throttle: THROTTLE });
+    if (!hits.length) throw new Error(`No Play Store game found for "${game}". Try the exact store title.`);
+    seedRaw = await gplay.app({ appId: hits[0].appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
+  }
+  const seed = normalizePlay(seedRaw, true);
+
+  // Competitors: Google's own "similar apps" list first, then a keyword search
+  // to top it up when the user asked for more than similar() returns.
+  const pool = [];
+  try {
+    pool.push(...await gplay.similar({ appId: seed.appId, country: COUNTRY, lang: LANG, throttle: THROTTLE }));
+  } catch { /* some apps have no similar list */ }
+
+  if (pool.length < max) {
+    try {
+      pool.push(...await gplay.search({
+        term: looksLikeBundle ? keywordFrom(seed.title) : game,
+        num: Math.min(max + 20, 100),
+        country: COUNTRY, lang: LANG, throttle: THROTTLE,
+      }));
+    } catch { /* similar list alone is fine */ }
+  }
+
+  const seen = new Set([seed.appId]);
+  const competitors = pool
+    .filter((x) => x && x.appId && !seen.has(x.appId) && seen.add(x.appId))
+    .map((x) => normalizePlay(x, false))
+    .slice(0, max);
+
+  // Search/similar results carry no installs or screenshots - fetch the real
+  // page for each until the time budget runs out.
+  await mapLimit(competitors, 6, deadline, async (c) => {
+    const full = await gplay.app({ appId: c.appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
+    Object.assign(c, normalizePlay(full, false));
+  });
+
+  competitors.sort((a, b) => (b.installsNum ?? -1) - (a.installsNum ?? -1));
+  return { seed, competitors };
+}
+
+// ----------------------------------------------------------------- iOS run
+
+async function scoutIos({ game, max }) {
+  const looksLikeId = /^\d{6,}$/.test(game.trim());
+
+  let seedRaw;
+  if (looksLikeId) {
+    seedRaw = await istore.app({ id: game.trim(), country: COUNTRY });
+  } else {
+    const hits = await istore.search({ term: game, num: 5, country: COUNTRY });
+    if (!hits.length) throw new Error(`No App Store game found for "${game}". Try the exact store title.`);
+    seedRaw = hits[0];
+  }
+  const seed = normalizeIos(seedRaw, true);
+
+  // Apple's lookup returns complete records (screenshots included), so one
+  // similar() call plus one search() is all we need - no per-app follow-ups.
+  const pool = [];
+  try {
+    pool.push(...await istore.similar({ id: seed.appId, country: COUNTRY }));
+  } catch { /* not every app has a "customers also bought" list */ }
+
+  if (pool.length < max) {
+    try {
+      pool.push(...await istore.search({
+        term: looksLikeId ? keywordFrom(seed.title) : game,
+        num: Math.min(max + 20, 100),
+        country: COUNTRY,
+      }));
+    } catch { /* similar list alone is fine */ }
+  }
+
+  const seen = new Set([seed.appId]);
+  const competitors = pool
+    .filter((x) => x && x.id && !seen.has(String(x.id)) && seen.add(String(x.id)))
+    .map((x) => normalizeIos(x, false))
+    .sort((a, b) => (b.reviewCount ?? -1) - (a.reviewCount ?? -1))
+    .slice(0, max);
+
+  return { seed, competitors };
+}
+
+// ------------------------------------------------------------------ export
+
+export default async function scout({ game, platform, min, max }) {
+  const deadline = Date.now() + BUDGET_MS;
+  return platform === "ios"
+    ? scoutIos({ game, max })
+    : scoutAndroid({ game, max, deadline });
+}
