@@ -49,8 +49,19 @@ async function hydrate() {
 
 function mergeApp(d) {
   if (!d || !d.appId || !current) return;
-  const a = current.competitors.find((x) => x.appId === d.appId);
-  if (!a) return;
+  const i = current.competitors.findIndex((x) => x.appId === d.appId);
+  if (i < 0) return;
+
+  // A store only reveals a title's real category on its detail page, so an
+  // ordinary app that matched the search words is dropped here, not shown.
+  if (current.gamesOnly && d.categoryType === "APP") {
+    current.competitors.splice(i, 1);
+    const stale = gridEl.querySelector(`[data-app-id="${cssEsc(d.appId)}"]`);
+    if (stale) stale.remove();
+    return;
+  }
+
+  const a = current.competitors[i];
   const keptRank = a.rank;
   Object.assign(a, d);
   if (d.rank == null && keptRank != null) a.rank = keptRank;  // don't lose a rank we had
