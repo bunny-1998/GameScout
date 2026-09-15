@@ -13,4 +13,16 @@ const candidates = [
 const publicDir = candidates.find((p) => fs.existsSync(p));
 if (publicDir) app.use(express.static(publicDir));
 
-export const handler = serverless(app);
+// serverless-http returns every response as a UTF-8 string unless it is told
+// which content types are binary. Without this, proxied store icons and
+// screenshots (/img) and the asset ZIP (/api/assets) arrive corrupted.
+export const handler = serverless(app, {
+  binary: [
+    "image/*",
+    "application/zip",
+    "application/octet-stream",
+    "font/*",
+    "audio/*",
+    "video/*",
+  ],
+});
