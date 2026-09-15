@@ -52,6 +52,7 @@ app.use(express.static(path.join(__dirname, "public")));
 // Pick the data source. Each adapter exposes the same scout() function so the
 // rest of the app doesn't care which provider is behind it.
 async function loadSource() {
+  if (SOURCE === "free") return (await import("../adapters/free.js")).default;
   if (SOURCE === "appstorespy") return (await import("../adapters/appstorespy.js")).default;
   if (SOURCE === "appbird") return (await import("../adapters/appbird.js")).default;
   return (await import("../mock/data.js")).default; // default: mock
