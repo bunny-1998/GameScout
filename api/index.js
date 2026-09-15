@@ -2,7 +2,6 @@ import express from "express";
 import dotenv from "dotenv";
 import path from "node:path";
 import crypto from "node:crypto";
-import { fileURLToPath } from "node:url";
 import { makeZip } from "../lib/zip.js";
 
 dotenv.config();
@@ -46,7 +45,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "1mb" }));
 
 // Serve the dashboard (the browser only ever talks to THIS server, never to
-// the data provider directly — so your API key never leaves the machine).
+// the data provider directly - so your API key never leaves the machine).
 app.use(express.static(path.join(__dirname, "public")));
 
 // Pick the data source. Each adapter exposes the same scout() function so the
@@ -77,6 +76,32 @@ app.get("/api/scout", async (req, res) => {
     console.error("[scout] failed:", err);
     res.status(502).json({
       error: "Couldn't reach the data source. Check your API key and DATA_SOURCE in .env.",
+      detail: String(err?.message || err),
+    });
+  }
+});
+
+// POST /api/details   { platform, ids: [...] }
+// Fills in the heavy per-app stats a batch at a time. The dashboard calls this
+// repeatedly after the first paint, so hundreds of cards can be populated
+// without any single request going near the 10s serverless limit.
+app.post("/api/details", async (req, res) => {
+  const { ids, platform } = req.body || {};
+  if (!Array.isArray(ids) || !ids.length) {
+    return res.status(400).json({ error: "No app ids given." });
+  }
+  try {
+    const mod = await import("../adapters/free.js");
+    if (typeof mod.fetchDetails !== "function") return res.json({ apps: [] });
+    const apps = await mod.fetchDetails({
+      ids,
+      platform: platform === "ios" ? "ios" : "android",
+    });
+    res.json({ apps });
+  } catch (err) {
+    console.error("[details] failed:", err);
+    res.status(502).json({
+      error: "Couldn't load extra stats for those games.",
       detail: String(err?.message || err),
     });
   }
@@ -154,6 +179,6 @@ app.get("/img", async (req, res) => {
   } catch {
     res.status(502).end();
   }
-}); 
+});
 
 export default app;
