@@ -112,6 +112,30 @@ function relevance(candidate, wantWords, seedGenres) {
   return score;
 }
 
+// ----------------------------------------------------------- games only
+
+// Play's search results carry no category at all - only a full app record
+// does - so an ordinary app that matched the search words is caught in two
+// passes: an obvious-app title screen while the pool is built, then a hard
+// genre check the moment real details arrive (eager head, or hydration).
+const APP_TITLE = /\b(wallpapers?|keyboards?|launchers?|vpn|browsers?|cleaners?|antivirus|scanners?|translator|dictionary|status ?saver|downloaders?|file manager|caller ?id|ringtones?|photo editor|video editor|selfie|screen recorder|flashlight|pdf|invoice|recharge|wallet)\b/i;
+
+function looksLikeApp(c) {
+  if (c._isGame) return false;
+  return APP_TITLE.test(c.title || "");
+}
+
+// Definitive, straight off a full store record: Play tags every game's
+// genreId "GAME_*", Apple files games under genre id 6014.
+function isGameRecord(raw) {
+  if (!raw) return false;
+  const gid = String(raw.genreId || "");
+  if (gid) return /^GAME/i.test(gid);
+  const ids = (raw.genreIds || []).map(String);
+  if (ids.length) return ids.includes("6014");
+  return /\bgames?\b/i.test(raw.primaryGenre || raw.genre || "");
+}
+
 // --------------------------------------------------------- category ranks
 
 // Chart lookups are cached for the life of the warm function instance, so
@@ -225,7 +249,8 @@ function normalizePlay(a, isSeed = false, full = false) {
       : (a.installs || null),
 
     category: titleCase(a.genre || ""),
-    categoryType: /game/i.test(a.genreId || a.genre || "") ? "GAME" : "APP",
+    // null means "not known yet" - only a full record can say for sure.
+    categoryType: (a.genreId || a.genre) ? (isGameRecord(a) ? "GAME" : "APP") : null,
     _genreId: a.genreId || "",
 
     version: a.version && a.version !== "VARY" ? a.version : "",
@@ -269,7 +294,7 @@ function normalizeIos(a, isSeed = false, full = true) {
     installsLabel: null,
 
     category: a.primaryGenre || "",
-    categoryType: /game/i.test(a.primaryGenre || "") ? "GAME" : "APP",
+    categoryType: (a.primaryGenre || (a.genreIds || []).length) ? (isGameRecord(a) ? "GAME" : "APP") : null,
     _genreId: sub || "",
 
     version: a.version || "",
@@ -315,7 +340,7 @@ async function androidPool(seed, seedRaw, query, max) {
     }
     if (seedRaw.genreId) {
       q.push(playChart(seedRaw.genreId).then((m) =>
-        m ? [...m.keys()].map((appId) => ({ appId })) : []
+        m ? [...m.keys()].map((appId) => ({ appId, _isGame: true })) : []
       ));
     }
   }
@@ -347,8 +372,13 @@ async function scoutAndroid({ game, max, deadline }) {
   const seedGenres = genreSet(seedRaw);
   const seen = new Set([seed.appId]);
 
+  // Searching a word like "ball" also matches wallpapers and keyboards, so
+  // when the seed is a game the results are held to games only.
+  const gamesOnly = isGameRecord(seedRaw);
+
   const scored = pool
     .filter((x) => x && x.appId && !seen.has(x.appId) && seen.add(x.appId))
+    .filter((x) => !gamesOnly || !looksLikeApp(x))
     .map((x) => ({ raw: x, score: relevance(x, wantWords, seedGenres) }));
 
   const kept = scored.filter((r) => r.score > 0);
@@ -366,7 +396,14 @@ async function scoutAndroid({ game, max, deadline }) {
   });
 
   await rankInOwnCategory([seed, ...head], "android", 2);
-  return { seed, competitors };
+
+  // Whatever the detail fetch just proved is an ordinary app goes now; the
+  // rest are checked the same way as hydration reaches them.
+  return {
+    seed,
+    competitors: gamesOnly ? competitors.filter((c) => c.categoryType !== "APP") : competitors,
+    gamesOnly,
+  };
 }
 
 // ----------------------------------------------------------------- iOS run
@@ -405,8 +442,13 @@ async function scoutIos({ game, max }) {
   const seedGenres = genreSet(seedRaw);
   const seen = new Set([seed.appId]);
 
+  // Apple returns the genre with every record, so non-games are dropped here
+  // and for good - iOS needs no second pass.
+  const gamesOnly = isGameRecord(seedRaw);
+
   const scored = pool
     .filter((x) => x && x.id && !seen.has(String(x.id)) && seen.add(String(x.id)))
+    .filter((x) => !gamesOnly || isGameRecord(x))
     .map((x) => ({ raw: x, score: relevance(x, wantWords, seedGenres) }));
 
   const kept = scored.filter((r) => r.score > 0);
@@ -416,7 +458,7 @@ async function scoutIos({ game, max }) {
     .map((r) => normalizeIos(r.raw, false));
 
   await rankInOwnCategory([seed, ...competitors], "ios", 3);
-  return { seed, competitors };
+  return { seed, competitors, gamesOnly };
 }
 
 // ------------------------------------------------- per-batch detail filling
