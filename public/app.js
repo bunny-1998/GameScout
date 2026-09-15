@@ -187,14 +187,10 @@ function openDrawer(a) {
       <span class="rating__count">(${fmtNum(a.ratingsCount)} ratings · ${fmtNum(a.reviewCount)} reviews)</span>
     </div>
 
-    <div class="dw-stats">
-      ${dwStat("Total installs", installs)}
-      ${dwStat("Downloads / mo", fmtNum(a.downloadsMonth))}
-      ${dwStat("Downloads / day", fmtNum(a.downloadsDaily))}
-      ${dwStat("Revenue / mo", fmtMoney(a.revenueMonth))}
-      ${dwStat("Category rank", a.rank ? "#" + a.rank : "—")}
-      ${dwStat("Age", a.ageDays != null ? a.ageDays + " days" : "—")}
-    </div>
+    <div class="dw-stats">${drawerStats(a)}</div>
+    ${a.downloadsMonth == null && current && current.source === "free"
+      ? `<p class="dw-text" style="opacity:.55">Download and revenue estimates aren't published by the stores — they're modelled data, and need an AppstoreSpy subscription.</p>`
+      : ""}
 
     <div class="dw-facts">
       ${fact("Package", a.bundle || a.appId)}
@@ -234,6 +230,27 @@ function openDrawer(a) {
   });
 
   $("#drawer").hidden = false;
+}
+
+// Show the six stats this app actually has, rather than a wall of dashes.
+// In free mode downloads/revenue are always absent, so their slots go to
+// ratings, reviews and update dates instead.
+function drawerStats(a) {
+  const installs = a.installsLabel || (a.installsNum != null ? fmtNum(a.installsNum) : null);
+  const defs = [
+    ["Total installs", installs, !!installs],
+    ["Downloads / mo", fmtNum(a.downloadsMonth), a.downloadsMonth != null],
+    ["Downloads / day", fmtNum(a.downloadsDaily), a.downloadsDaily != null],
+    ["Revenue / mo", fmtMoney(a.revenueMonth), a.revenueMonth != null],
+    ["Category rank", "#" + a.rank, !!a.rank],
+    ["Rating", fmtRating(a.rating), a.rating != null],
+    ["Ratings", fmtNum(a.ratingsCount), a.ratingsCount != null],
+    ["Reviews", fmtNum(a.reviewCount), a.reviewCount != null],
+    ["Age", a.ageDays != null ? a.ageDays + " days" : null, a.ageDays != null],
+    ["Updated", a.updated, !!a.updated],
+  ];
+  const shown = defs.filter((d) => d[2]).slice(0, 6);
+  return shown.map((d) => dwStat(d[0], d[1])).join("");
 }
 
 // ---------- assets download ----------
