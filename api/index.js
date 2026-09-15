@@ -1,12 +1,29 @@
 import express from "express";
 import dotenv from "dotenv";
 import path from "node:path";
+import fs from "node:fs";
 import crypto from "node:crypto";
 import { makeZip } from "../lib/zip.js";
 
 dotenv.config();
 
-const __dirname = process.cwd();
+// Each host drops the bundle somewhere different - Netlify runs the function
+// from the repo root, Vercel from /var/task - so find public/ rather than
+// assuming where it is. Last resort is this file's own folder; Netlify's
+// esbuild turns import.meta into CommonJS and leaves .url undefined, hence
+// the try - it just yields no candidate there, and cwd already covers it.
+const HERE = (() => {
+  try { return path.dirname(new URL(import.meta.url).pathname); } catch { return null; }
+})();
+
+const PUBLIC_DIR =
+  [path.join(process.cwd(), "public"),
+   path.join(process.cwd(), "..", "public"),
+   "/var/task/public",
+   HERE && path.join(HERE, "..", "public")]
+    .filter(Boolean)
+    .find((d) => fs.existsSync(path.join(d, "index.html")))
+  || path.join(process.cwd(), "public");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SOURCE = (process.env.DATA_SOURCE || "mock").toLowerCase();
@@ -46,7 +63,7 @@ app.use(express.json({ limit: "1mb" }));
 
 // Serve the dashboard (the browser only ever talks to THIS server, never to
 // the data provider directly - so your API key never leaves the machine).
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(PUBLIC_DIR));
 
 // Pick the data source. Each adapter exposes the same scout() function so the
 // rest of the app doesn't care which provider is behind it.
