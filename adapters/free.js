@@ -77,6 +77,41 @@ async function mapLimit(items, limit, deadline, fn) {
   await Promise.all(workers);
 }
 
+// --------------------------------------------------------- relevance match
+
+// Words worth matching on (drops "the", "of", short noise).
+function tokens(s) {
+  return new Set(
+    String(s || "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N} ]+/gu, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2)
+  );
+}
+
+// Genres so broad they say nothing about what the game actually is.
+const GENERIC_GENRES = new Set(["games", "entertainment", "app", "apps"]);
+
+function genreSet(a) {
+  const raw = [].concat(a.genres || [], a.genre || [], a.primaryGenre || []);
+  return new Set(
+    raw.map((g) => String(g).toLowerCase().replace(/^games?[_ ]/, "").trim())
+       .filter((g) => g && !GENERIC_GENRES.has(g))
+  );
+}
+
+// How much does this candidate look like a real competitor of the seed?
+// Apple's similar() is really "customers also bought", so without this a
+// puzzle search comes back full of trivia and hypercasual runners.
+function relevance(candidate, wantWords, seedGenres) {
+  const words = tokens(candidate.title || candidate.name);
+  let score = 0;
+  for (const w of wantWords) if (words.has(w)) score += 2;
+  for (const g of genreSet(candidate)) if (seedGenres.has(g)) score += 3;
+  return score;
+}
+
 // ------------------------------------------------------- shape normalizers
 
 const EMPTY_ESTIMATES = {
@@ -204,11 +239,20 @@ async function scoutAndroid({ game, max, deadline }) {
     } catch { /* similar list alone is fine */ }
   }
 
+  const wantWords = tokens(looksLikeBundle ? seed.title : game);
+  const seedGenres = genreSet(seedRaw);
   const seen = new Set([seed.appId]);
-  const competitors = pool
+
+  const scored = pool
     .filter((x) => x && x.appId && !seen.has(x.appId) && seen.add(x.appId))
-    .map((x) => normalizePlay(x, false))
-    .slice(0, max);
+    .map((x) => ({ raw: x, score: relevance(x, wantWords, seedGenres) }));
+
+  // Keep only plausible competitors; if that leaves too few, fall back to all.
+  const kept = scored.filter((r) => r.score > 0);
+  const competitors = (kept.length >= 5 ? kept : scored)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, max)
+    .map((r) => normalizePlay(r.raw, false));
 
   // Search/similar results carry no installs or screenshots - fetch the real
   // page for each until the time budget runs out.
@@ -236,29 +280,35 @@ async function scoutIos({ game, max }) {
   }
   const seed = normalizeIos(seedRaw, true);
 
-  // Apple's lookup returns complete records (screenshots included), so one
-  // similar() call plus one search() is all we need - no per-app follow-ups.
+  // Search FIRST on iOS. Apple's similar() is "customers also bought", which
+  // returns whatever big casual titles the same audience installs; keyword
+  // search is far closer to "games like this one".
   const pool = [];
+  try {
+    pool.push(...await istore.search({
+      term: looksLikeId ? keywordFrom(seed.title) : game,
+      num: Math.min(max + 30, 100),
+      country: COUNTRY,
+    }));
+  } catch { /* fall back to the similar list below */ }
+
   try {
     pool.push(...await istore.similar({ id: seed.appId, country: COUNTRY }));
   } catch { /* not every app has a "customers also bought" list */ }
 
-  if (pool.length < max) {
-    try {
-      pool.push(...await istore.search({
-        term: looksLikeId ? keywordFrom(seed.title) : game,
-        num: Math.min(max + 20, 100),
-        country: COUNTRY,
-      }));
-    } catch { /* similar list alone is fine */ }
-  }
-
+  const wantWords = tokens(looksLikeId ? seed.title : game);
+  const seedGenres = genreSet(seedRaw);
   const seen = new Set([seed.appId]);
-  const competitors = pool
+
+  const scored = pool
     .filter((x) => x && x.id && !seen.has(String(x.id)) && seen.add(String(x.id)))
-    .map((x) => normalizeIos(x, false))
-    .sort((a, b) => (b.reviewCount ?? -1) - (a.reviewCount ?? -1))
-    .slice(0, max);
+    .map((x) => ({ raw: x, score: relevance(x, wantWords, seedGenres) }));
+
+  const kept = scored.filter((r) => r.score > 0);
+  const competitors = (kept.length >= 5 ? kept : scored)
+    .sort((a, b) => (b.score - a.score) || ((b.raw.reviews ?? 0) - (a.raw.reviews ?? 0)))
+    .slice(0, max)
+    .map((r) => normalizeIos(r.raw, false));
 
   return { seed, competitors };
 }
