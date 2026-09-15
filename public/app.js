@@ -212,7 +212,7 @@ function openDrawer(a) {
     <h3 class="dw-shots-h">Screenshots</h3>
     <div class="dw-shots">
       ${shots.map((s) => a.screenshots && a.screenshots.length
-        ? `<img src="${proxied(s, "shot")}" alt="${esc(a.title)} screenshot" />`
+        ? `<img ${imgAttrs(s, "shot")} alt="${esc(a.title)} screenshot" />`
         : `<span class="shot" style="background:${s}"></span>`).join("")}
     </div>
 
@@ -291,17 +291,44 @@ function metric(label, v) { return `<div class="metric"><span>${label}</span><b>
 function dwStat(label, v) { return `<div class="dw-stat"><span>${label}</span><b>${v}</b></div>`; }
 function fact(label, v) { return `<div class="fact"><span>${esc(label)}</span><b>${esc(v || "—")}</b></div>`; }
 
-// route real store image URLs through our server so they always load, at the
-// right resolution (icon 512, screenshots 1080)
-function proxied(u, kind) {
-  return u && /^https?:\/\//i.test(u)
-    ? "/img?u=" + encodeURIComponent(u) + (kind ? "&k=" + kind : "")
-    : u;
+// Store CDNs serve these images to anyone, so the browser loads them straight
+// from Google and Apple. Routing them through /img instead costs one
+// serverless call per icon and per screenshot - on a 200-game search that is
+// hundreds of calls, which is what drained the last host's monthly credits.
+// Any host that does refuse us falls back to the proxy, in the listener below.
+function imgAttrs(u, kind) {
+  if (!u || !/^https?:\/\//i.test(u)) return `src="${esc(u || "")}"`;
+  return `src="${esc(hiRes(u, kind))}" data-src="${esc(u)}" data-kind="${kind}"`;
 }
+
+// Ask the CDN for a bigger rendition - same rules the server used.
+//   kind "icon" -> 512x512     kind "shot" -> 1080 wide
+function hiRes(u, kind) {
+  if (/googleusercontent\.com|ggpht\.com/i.test(u)) {
+    return u.replace(/=[^/]*$/, "") + (kind === "icon" ? "=s512" : "=w1080");
+  }
+  if (/mzstatic\.com/i.test(u)) {
+    const dim = kind === "icon" ? "512x512bb" : "1080x1920bb";
+    return u
+      .replace(/\/\d{2,4}x\d{2,4}[a-z]{0,2}\.(jpg|png|webp)/i, `/${dim}.$1`)
+      .replace(/\/\d{2,4}x0w\.(jpg|png|webp)/i, `/${dim}.$1`);
+  }
+  return u;
+}
+
+// One retry per image, through the server, if the CDN turns us away.
+document.addEventListener("error", (e) => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || img.dataset.viaProxy) return;
+  const orig = img.dataset.src;
+  if (!orig) return;
+  img.dataset.viaProxy = "1";
+  img.src = "/img?u=" + encodeURIComponent(orig) + "&k=" + (img.dataset.kind || "shot");
+}, true);
 
 function shotThumb(a, s) {
   return a.screenshots && a.screenshots.length
-    ? `<img class="shot" src="${proxied(s, "shot")}" alt="${esc(a.title)} screenshot" loading="lazy" />`
+    ? `<img class="shot" ${imgAttrs(s, "shot")} alt="${esc(a.title)} screenshot" loading="lazy" />`
     : `<span class="shot" style="background:${s}"></span>`;
 }
 
@@ -322,7 +349,7 @@ function hueOf(str) {
 }
 
 function imgOrArt(a, cls, size) {
-  if (a.icon) return `<img class="${cls}" src="${proxied(a.icon, "icon")}" alt="${esc(a.title)} icon" width="${size}" height="${size}" loading="lazy" />`;
+  if (a.icon) return `<img class="${cls}" ${imgAttrs(a.icon, "icon")} alt="${esc(a.title)} icon" width="${size}" height="${size}" loading="lazy" />`;
   const hue = a.hue ?? hueOf(a.seed || a.title);
   const initials = (a.title || "?").split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
   const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}' viewBox='0 0 100 100'>
