@@ -3,13 +3,17 @@
 //   Android : google-play-scraper   (reads the public Play Store pages)
 //   iOS     : app-store-scraper     (Apple's public iTunes search/lookup)
 //
-// What you DO get: the seed game, its competitors, icons, screenshots,
-// ratings, review counts, install counts, category rank, developer, dates,
-// IAP and ad-supported flags.
+// Two entry points:
+//   scout()        - finds the seed + as many real competitors as it can, fast.
+//                    Cards come back with name/icon/developer/rating straight
+//                    away; installs, screenshots and rank follow.
+//   fetchDetails() - fills in the heavy per-app stats for a batch of ids.
+//                    The dashboard calls this repeatedly after the first paint,
+//                    which is how hundreds of games get fully populated without
+//                    any single request exceeding the 10s function limit.
 //
-// What you DON'T get: downloads/month, downloads/day and revenue estimates.
-// Those are modelled numbers, not public data, so no free source has them -
-// the dashboard hides those tiles rather than showing a guess.
+// Downloads/month, downloads/day and revenue stay empty: those are modelled
+// numbers, not public data, so no free source has them.
 
 import gplayPkg from "google-play-scraper";
 import istorePkg from "app-store-scraper";
@@ -20,10 +24,12 @@ const istore = istorePkg.default || istorePkg;
 const COUNTRY = (process.env.APP_COUNTRY || "US").toLowerCase();
 const LANG = (process.env.APP_LANGUAGE || "en_US").split(/[_-]/)[0].toLowerCase();
 
-// Play Store bans an IP for ~1 hour if you hammer it, so cap requests/second.
-const THROTTLE = Number(process.env.SCRAPE_THROTTLE || 8);
-// Serverless functions get killed at 10s, so stop enriching before that.
+// Play bans an IP for ~1 hour if you hammer it, so cap requests/second.
+const THROTTLE = Number(process.env.SCRAPE_THROTTLE || 6);
+// Serverless functions are killed at 10s; stop well before that.
 const BUDGET_MS = Number(process.env.SCRAPE_BUDGET_MS || 6500);
+// How many competitors scout() enriches itself before handing over.
+const EAGER = Number(process.env.SCRAPE_EAGER || 12);
 
 // ---------------------------------------------------------------- helpers
 
@@ -54,7 +60,6 @@ function titleCase(s) {
     .replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-// "Ball Connect Puzzle: Link Dots" -> "Ball Connect"
 function keywordFrom(title) {
   const head = String(title || "")
     .split(/[:\-|]/)[0]
@@ -64,14 +69,12 @@ function keywordFrom(title) {
   return words.slice(0, 2).join(" ") || String(title || "").trim();
 }
 
-// Run tasks with a concurrency cap AND a wall-clock deadline: whatever hasn't
-// finished by the deadline is simply skipped, so we always return something.
 async function mapLimit(items, limit, deadline, fn) {
   let i = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (i < items.length && Date.now() < deadline) {
       const idx = i++;
-      try { await fn(items[idx], idx); } catch { /* keep the basic card */ }
+      try { await fn(items[idx], idx); } catch { /* keep whatever we have */ }
     }
   });
   await Promise.all(workers);
@@ -79,7 +82,6 @@ async function mapLimit(items, limit, deadline, fn) {
 
 // --------------------------------------------------------- relevance match
 
-// Words worth matching on (drops "the", "of", short noise).
 function tokens(s) {
   return new Set(
     String(s || "")
@@ -90,7 +92,6 @@ function tokens(s) {
   );
 }
 
-// Genres so broad they say nothing about what the game actually is.
 const GENERIC_GENRES = new Set(["games", "entertainment", "app", "apps"]);
 
 function genreSet(a) {
@@ -101,9 +102,8 @@ function genreSet(a) {
   );
 }
 
-// How much does this candidate look like a real competitor of the seed?
-// Apple's similar() is really "customers also bought", so without this a
-// puzzle search comes back full of trivia and hypercasual runners.
+// Apple's similar() is "customers also bought", so score candidates on shared
+// title words and shared sub-genre rather than trusting the list.
 function relevance(candidate, wantWords, seedGenres) {
   const words = tokens(candidate.title || candidate.name);
   let score = 0;
@@ -114,46 +114,75 @@ function relevance(candidate, wantWords, seedGenres) {
 
 // --------------------------------------------------------- category ranks
 
-// Real category rank, read off the live top-free chart for the seed's own
-// category. Only charting games get a number - everyone else genuinely has
-// no rank, so the tile stays empty rather than showing a guess.
-async function playRankMap(genreId) {
-  if (!genreId || !/^GAME/i.test(String(genreId))) return new Map();
+// Chart lookups are cached for the life of the warm function instance, so
+// later detail batches reuse them instead of re-fetching.
+const playCharts = new Map();
+const iosCharts = new Map();
+
+async function playChart(genreId, allowance) {
+  const key = String(genreId || "");
+  if (!key || !/^GAME/i.test(key)) return null;
+  if (playCharts.has(key)) return playCharts.get(key);
+  if (allowance && allowance.left <= 0) return null;
+  if (allowance) allowance.left--;
   try {
     const chart = await gplay.list({
       collection: gplay.collection.TOP_FREE,
-      category: String(genreId),
+      category: key,
       num: 200,
       country: COUNTRY,
       lang: LANG,
       throttle: THROTTLE,
     });
-    return new Map(chart.map((a, i) => [a.appId, i + 1]));
+    const map = new Map(chart.map((a, i) => [a.appId, i + 1]));
+    playCharts.set(key, map);
+    return map;
   } catch {
-    return new Map();
+    playCharts.set(key, new Map());
+    return playCharts.get(key);
   }
 }
 
-async function iosRankMap(genreIds) {
-  // 6014 is the catch-all "Games" id; the sub-genre chart is the useful one.
-  const sub = (genreIds || []).map(String).find((g) => g && g !== "6014");
-  if (!sub) return new Map();
+async function iosChart(genreId, allowance) {
+  const key = String(genreId || "");
+  if (!key || key === "6014") return null;
+  if (iosCharts.has(key)) return iosCharts.get(key);
+  if (allowance && allowance.left <= 0) return null;
+  if (allowance) allowance.left--;
   try {
     const chart = await istore.list({
       collection: istore.collection.TOP_FREE_IOS,
-      category: Number(sub),
+      category: Number(key),
       num: 200,
       country: COUNTRY,
     });
-    return new Map(chart.map((a, i) => [String(a.id), i + 1]));
+    const map = new Map(chart.map((a, i) => [String(a.id), i + 1]));
+    iosCharts.set(key, map);
+    return map;
   } catch {
-    return new Map();
+    iosCharts.set(key, new Map());
+    return iosCharts.get(key);
   }
 }
 
-function applyRanks(ranks, seed, competitors) {
-  seed.rank = ranks.get(seed.appId) ?? null;
-  for (const c of competitors) c.rank = ranks.get(c.appId) ?? null;
+// Rank each app inside its OWN category, fetching at most `maxCharts` new
+// category charts per request so one batch never blows the time budget.
+async function rankInOwnCategory(apps, platform, maxCharts = 2) {
+  const allowance = { left: maxCharts };
+  const byGenre = new Map();
+  for (const a of apps) {
+    const g = a._genreId;
+    if (!g) continue;
+    if (!byGenre.has(g)) byGenre.set(g, []);
+    byGenre.get(g).push(a);
+  }
+  for (const [genreId, group] of byGenre) {
+    const map = platform === "ios"
+      ? await iosChart(genreId, allowance)
+      : await playChart(genreId, allowance);
+    if (!map) continue;
+    for (const a of group) a.rank = map.get(a.appId) ?? null;
+  }
 }
 
 // ------------------------------------------------------- shape normalizers
@@ -169,7 +198,9 @@ const EMPTY_ESTIMATES = {
   urlSpy: "",
 };
 
-function normalizePlay(a, isSeed = false) {
+// `full` marks records that came from a real app-detail page, so the dashboard
+// knows which cards still need hydrating.
+function normalizePlay(a, isSeed = false, full = false) {
   return {
     appId: a.appId || "",
     bundle: a.appId || "",
@@ -184,8 +215,7 @@ function normalizePlay(a, isSeed = false) {
     ratingsCount: a.ratings != null ? Number(a.ratings) : null,
     reviewCount: a.reviews != null ? Number(a.reviews) : null,
 
-    // Play publishes a near-exact count (maxInstalls) next to the
-    // "10,000,000+" band; prefer the real number when it is there.
+    // Play publishes a near-exact count next to the "10,000,000+" band.
     installsNum:
       a.maxInstalls != null ? Number(a.maxInstalls)
       : a.minInstalls != null ? Number(a.minInstalls)
@@ -196,6 +226,7 @@ function normalizePlay(a, isSeed = false) {
 
     category: titleCase(a.genre || ""),
     categoryType: /game/i.test(a.genreId || a.genre || "") ? "GAME" : "APP",
+    _genreId: a.genreId || "",
 
     version: a.version && a.version !== "VARY" ? a.version : "",
     size: "",
@@ -213,11 +244,13 @@ function normalizePlay(a, isSeed = false) {
 
     url: a.url || (a.appId ? `https://play.google.com/store/apps/details?id=${a.appId}` : ""),
     isSeed,
+    full,
     ...EMPTY_ESTIMATES,
   };
 }
 
-function normalizeIos(a, isSeed = false) {
+function normalizeIos(a, isSeed = false, full = true) {
+  const sub = (a.genreIds || []).map(String).find((g) => g && g !== "6014");
   return {
     appId: String(a.id || ""),
     bundle: a.appId || "",
@@ -237,6 +270,7 @@ function normalizeIos(a, isSeed = false) {
 
     category: a.primaryGenre || "",
     categoryType: /game/i.test(a.primaryGenre || "") ? "GAME" : "APP",
+    _genreId: sub || "",
 
     version: a.version || "",
     size: humanSize(a.size),
@@ -254,11 +288,43 @@ function normalizeIos(a, isSeed = false) {
 
     url: a.url || "",
     isSeed,
+    full,
     ...EMPTY_ESTIMATES,
   };
 }
 
 // ------------------------------------------------------------- Android run
+
+// Several angles of attack, so even a niche genre returns hundreds of titles:
+// Google's own similar list, the phrase itself, each meaningful word on its
+// own, and the category's top-free chart.
+async function androidPool(seed, seedRaw, query, max) {
+  const q = [];
+  const words = [...tokens(query)].slice(0, 3);
+
+  q.push(gplay.similar({ appId: seed.appId, country: COUNTRY, lang: LANG, throttle: THROTTLE }));
+  q.push(gplay.search({ term: query, num: 100, country: COUNTRY, lang: LANG, throttle: THROTTLE }));
+
+  const kw = keywordFrom(seed.title);
+  if (kw && kw.toLowerCase() !== query.toLowerCase()) {
+    q.push(gplay.search({ term: kw, num: 100, country: COUNTRY, lang: LANG, throttle: THROTTLE }));
+  }
+  if (max > 40) {
+    for (const w of words) {
+      q.push(gplay.search({ term: w, num: 100, country: COUNTRY, lang: LANG, throttle: THROTTLE }));
+    }
+    if (seedRaw.genreId) {
+      q.push(playChart(seedRaw.genreId).then((m) =>
+        m ? [...m.keys()].map((appId) => ({ appId })) : []
+      ));
+    }
+  }
+
+  const settled = await Promise.allSettled(q);
+  const pool = [];
+  for (const r of settled) if (r.status === "fulfilled" && Array.isArray(r.value)) pool.push(...r.value);
+  return pool;
+}
 
 async function scoutAndroid({ game, max, deadline }) {
   const looksLikeBundle = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/i.test(game.trim());
@@ -271,24 +337,11 @@ async function scoutAndroid({ game, max, deadline }) {
     if (!hits.length) throw new Error(`No Play Store game found for "${game}". Try the exact store title.`);
     seedRaw = await gplay.app({ appId: hits[0].appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
   }
-  const seed = normalizePlay(seedRaw, true);
+  const seed = normalizePlay(seedRaw, true, true);
 
-  // Competitors: Google's own "similar apps" list first, then a keyword search
-  // to top it up when the user asked for more than similar() returns.
-  const pool = [];
-  try {
-    pool.push(...await gplay.similar({ appId: seed.appId, country: COUNTRY, lang: LANG, throttle: THROTTLE }));
-  } catch { /* some apps have no similar list */ }
-
-  if (pool.length < max) {
-    try {
-      pool.push(...await gplay.search({
-        term: looksLikeBundle ? keywordFrom(seed.title) : game,
-        num: Math.min(max + 20, 100),
-        country: COUNTRY, lang: LANG, throttle: THROTTLE,
-      }));
-    } catch { /* similar list alone is fine */ }
-  }
+  // A bundle-id search still gets a full name search, using the resolved title.
+  const query = looksLikeBundle ? keywordFrom(seed.title) : game;
+  const pool = await androidPool(seed, seedRaw, query, max);
 
   const wantWords = tokens(looksLikeBundle ? seed.title : game);
   const seedGenres = genreSet(seedRaw);
@@ -298,26 +351,21 @@ async function scoutAndroid({ game, max, deadline }) {
     .filter((x) => x && x.appId && !seen.has(x.appId) && seen.add(x.appId))
     .map((x) => ({ raw: x, score: relevance(x, wantWords, seedGenres) }));
 
-  // Keep only plausible competitors; if that leaves too few, fall back to all.
   const kept = scored.filter((r) => r.score > 0);
   const competitors = (kept.length >= 5 ? kept : scored)
     .sort((a, b) => b.score - a.score)
     .slice(0, max)
-    .map((r) => normalizePlay(r.raw, false));
+    .map((r) => normalizePlay(r.raw, false, false));
 
-  // Search/similar results carry no installs or screenshots - fetch the real
-  // page for each until the time budget runs out. The category chart is
-  // pulled alongside it, so it costs no extra wall-clock.
-  const [ranks] = await Promise.all([
-    playRankMap(seedRaw.genreId),
-    mapLimit(competitors, 6, deadline, async (c) => {
-      const full = await gplay.app({ appId: c.appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
-      Object.assign(c, normalizePlay(full, false));
-    }),
-  ]);
-  applyRanks(ranks, seed, competitors);
+  // Enrich the first screenful here so the page looks complete immediately;
+  // the dashboard hydrates the rest through fetchDetails().
+  const head = competitors.slice(0, EAGER);
+  await mapLimit(head, 5, deadline, async (c) => {
+    const full = await gplay.app({ appId: c.appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
+    Object.assign(c, normalizePlay(full, false, true));
+  });
 
-  competitors.sort((a, b) => (b.installsNum ?? -1) - (a.installsNum ?? -1));
+  await rankInOwnCategory([seed, ...head], "android", 2);
   return { seed, competitors };
 }
 
@@ -336,21 +384,22 @@ async function scoutIos({ game, max }) {
   }
   const seed = normalizeIos(seedRaw, true);
 
-  // Search FIRST on iOS. Apple's similar() is "customers also bought", which
-  // returns whatever big casual titles the same audience installs; keyword
-  // search is far closer to "games like this one".
-  const pool = [];
-  try {
-    pool.push(...await istore.search({
-      term: looksLikeId ? keywordFrom(seed.title) : game,
-      num: Math.min(max + 30, 100),
-      country: COUNTRY,
-    }));
-  } catch { /* fall back to the similar list below */ }
+  const query = looksLikeId ? keywordFrom(seed.title) : game;
+  const words = [...tokens(query)].slice(0, 3);
 
-  try {
-    pool.push(...await istore.similar({ id: seed.appId, country: COUNTRY }));
-  } catch { /* not every app has a "customers also bought" list */ }
+  // Apple's lookup returns complete records, so everything here is already
+  // "full" - iOS needs no hydration pass.
+  const q = [
+    istore.search({ term: query, num: 100, country: COUNTRY }),
+    istore.similar({ id: seed.appId, country: COUNTRY }),
+  ];
+  if (max > 40) {
+    for (const w of words) q.push(istore.search({ term: w, num: 100, country: COUNTRY }));
+  }
+
+  const settled = await Promise.allSettled(q);
+  const pool = [];
+  for (const r of settled) if (r.status === "fulfilled" && Array.isArray(r.value)) pool.push(...r.value);
 
   const wantWords = tokens(looksLikeId ? seed.title : game);
   const seedGenres = genreSet(seedRaw);
@@ -366,9 +415,33 @@ async function scoutIos({ game, max }) {
     .slice(0, max)
     .map((r) => normalizeIos(r.raw, false));
 
-  applyRanks(await iosRankMap(seedRaw.genreIds), seed, competitors);
-
+  await rankInOwnCategory([seed, ...competitors], "ios", 3);
   return { seed, competitors };
+}
+
+// ------------------------------------------------- per-batch detail filling
+
+export async function fetchDetails({ ids, platform }) {
+  const list = [...new Set((ids || []).filter(Boolean).map(String))].slice(0, 12);
+  if (!list.length) return [];
+
+  const deadline = Date.now() + 7000;
+  const out = [];
+
+  if (platform === "ios") {
+    await mapLimit(list, 4, deadline, async (id) => {
+      const a = await istore.app({ id, country: COUNTRY });
+      out.push(normalizeIos(a, false));
+    });
+  } else {
+    await mapLimit(list, 5, deadline, async (appId) => {
+      const a = await gplay.app({ appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
+      out.push(normalizePlay(a, false, true));
+    });
+  }
+
+  await rankInOwnCategory(out, platform, 2);
+  return out;
 }
 
 // ------------------------------------------------------------------ export
