@@ -74,6 +74,40 @@ async function loadSource() {
   return (await import("../mock/data.js")).default; // default: mock
 }
 
+// With an AppstoreSpy key present, top the free results up with the three
+// figures no public store publishes: downloads/mo, downloads/day, revenue/mo.
+// It is bulk-queried, so a search costs a few credits rather than one per
+// game - and if the key is missing, rejected or out of credits, the search
+// still returns, just without those three.
+async function withEstimates(result, { game, platform }) {
+  if (!process.env.API_KEY || SOURCE === "appstorespy") return result;
+  try {
+    const { estimates } = await import("../adapters/appstorespy.js");
+    // A bundle id or numeric store id is no use as a name filter - the
+    // resolved title is what other games of the same type share.
+    const looksLikeId =
+      /^\d{6,}$/.test(game.trim()) || /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/i.test(game.trim());
+    const query = looksLikeId ? (result.seed && result.seed.title) || game : game;
+
+    const map = await estimates({ query, platform });
+    if (!map.size) return result;
+
+    const fill = (a) => {
+      const e = a && (map.get(String(a.bundle)) || map.get(String(a.appId)));
+      if (e) Object.assign(a, e);
+    };
+    fill(result.seed);
+    (result.competitors || []).forEach(fill);
+
+    // handed to the browser too, so hydration doesn't wipe them when it
+    // replaces a card's record with a fresh free-mode one
+    return { ...result, estimates: Object.fromEntries(map) };
+  } catch (err) {
+    console.warn("[estimates] skipped:", err.message);
+    return result;
+  }
+}
+
 // GET /api/scout?game=Merge%20Kingdom&platform=ios&min=8&max=12
 app.get("/api/scout", async (req, res) => {
   const game = (req.query.game || "").toString().trim();
@@ -88,7 +122,7 @@ app.get("/api/scout", async (req, res) => {
   try {
     const source = await loadSource();
     const result = await source({ game, platform, min, max });
-    res.json({ source: SOURCE, ...result });
+    res.json({ source: SOURCE, ...(await withEstimates(result, { game, platform })) });
   } catch (err) {
     console.error("[scout] failed:", err);
     res.status(502).json({
