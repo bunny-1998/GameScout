@@ -1,0 +1,51 @@
+# Once a day, record how many installs each tracked game has.
+#
+# Google publishes the cumulative total but never the rate. The difference
+# between two days IS the rate - measured rather than modelled - so this job
+# is what puts real "downloads / day" numbers on the dashboard.
+#
+# It runs on GitHub's runners and commits to this repo, so it needs no API
+# key, no database and no payment method.
+
+name: Track installs
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 04:00 UTC daily
+  workflow_dispatch:       # and on demand, from the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: track-installs
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install --omit=dev
+
+      - name: Read today's install counts
+        run: node scripts/track-installs.mjs
+        env:
+          TRACK_CATEGORIES: GAME_PUZZLE,GAME_CASUAL,GAME_ARCADE
+          TRACK_PER_CATEGORY: "100"
+          APP_COUNTRY: us
+
+      - name: Commit the snapshot
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/installs.json public/installs.json
+          git diff --staged --quiet && echo "nothing changed" && exit 0
+          git commit -m "Install snapshot $(date -u +%F)"
+          git push
