@@ -113,7 +113,8 @@ function card(a) {
   const shots = artShots(a, 3);
   const pills = [
     a.category && `<span class="pill">${esc(a.category)}</span>`,
-    a.iap && `<span class="pill pill--soft">IAP</span>`,
+    a.size && `<span class="pill pill--ghost">${esc(a.size)}</span>`,
+    a.iap && `<span class="pill pill--soft">${esc(a.iapRange || "IAP")}</span>`,
     a.advertised && `<span class="pill pill--soft">Ads</span>`,
     a.country && `<span class="pill pill--ghost">${esc(a.country)}</span>`,
   ].filter(Boolean).join("");
@@ -151,20 +152,36 @@ function card(a) {
     </article>`;
 }
 
-// choose up to 4 metrics that actually have data, so nothing shows as "—"
+// Every figure the stores publish, on every card - two columns, up to eight
+// rows. A card shows each stat that has a value, so in free mode the grid
+// fills with installs, dates, rating and reviews where a paid source would
+// also carry downloads and revenue.
 function pickMetrics(a) {
-  const installs = a.installsLabel || (a.installsNum != null ? fmtNum(a.installsNum) + "+" : null);
   const defs = [
-    ["Downloads / mo", fmtNum(a.downloadsMonth), a.downloadsMonth != null],
-    ["Revenue / mo", fmtMoney(a.revenueMonth), a.revenueMonth != null],
-    ["Installs", installs, !!installs],
-    ["Downloads / day", fmtNum(a.downloadsDaily), a.downloadsDaily != null],
-    ["Reviews", fmtNum(a.reviewCount), a.reviewCount != null],
-    ["Released", a.released, !!a.released],
-    ["Rank", a.rank ? "#" + a.rank : null, !!a.rank],
+    ["Installs", a.installsNum != null ? fmtNum(a.installsNum) : a.installsLabel],
+    ["Dwnld / day", a.downloadsDaily != null ? fmtNum(a.downloadsDaily) : null],
+    ["Released", fmtAge(a.ageDays)],
+    ["Updated", fmtAge(daysSinceISO(a.updated))],
+    ["Revenue / mo", a.revenueMonth != null ? fmtMoney(a.revenueMonth) : null],
+    ["Dwnld / mo", a.downloadsMonth != null ? fmtNum(a.downloadsMonth) : null],
+    ["Rating", a.rating != null ? fmtRating(a.rating) : null],
+    ["Reviews", a.reviewCount != null ? fmtNum(a.reviewCount) : null],
   ];
-  const shown = defs.filter((d) => d[2]).slice(0, 4);
-  return shown.length ? shown : [["Downloads / mo", "—"], ["Revenue / mo", "—"]];
+  const shown = defs.filter((d) => d[1] != null && d[1] !== "" && d[1] !== "—").slice(0, 8);
+  return shown.length ? shown : [["Installs", "—"], ["Rating", "—"]];
+}
+
+// Compact ages, the way a store listing reads them: 6y, 8mo, 12d.
+function fmtAge(days) {
+  if (days == null) return null;
+  if (days >= 365) return Math.floor(days / 365) + "y";
+  if (days >= 30) return Math.floor(days / 30) + "mo";
+  return days + "d";
+}
+
+function daysSinceISO(iso) {
+  const t = Date.parse(iso || "");
+  return isNaN(t) ? null : Math.max(0, Math.round((Date.now() - t) / 86400000));
 }
 
 function openDrawer(a) {
