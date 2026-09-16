@@ -64,6 +64,13 @@ function mergeApp(d) {
   const a = current.competitors[i];
   const keptRank = a.rank;
   Object.assign(a, d);
+
+  // A fresh free-mode record carries empty downloads/revenue, so put back the
+  // AppstoreSpy figures the search merged in - otherwise hydration would
+  // blank the very stats we paid credits for.
+  const est = current.estimates && (current.estimates[a.bundle] || current.estimates[a.appId]);
+  if (est) Object.assign(a, est);
+
   if (d.rank == null && keptRank != null) a.rank = keptRank;  // don't lose a rank we had
   patchCard(a);
 }
