@@ -45,7 +45,9 @@ async function scout() {
   errorEl.hidden = true;
   btn.disabled = true;
   btn.textContent = "Scouting…";
-  showSkeletons(+n);
+  // The first response only carries the games already verified; the rest
+  // arrive as they clear, so don't promise a full screen of placeholders.
+  showSkeletons(Math.min(+n, 12));
 
   try {
     const res = await fetch(`/api/scout?game=${encodeURIComponent(game)}&platform=${platform}&min=${n}&max=${n}`);
@@ -100,7 +102,8 @@ function render() {
   );
 
   toolbarEl.hidden = false;
-  $("#result-count").textContent = `${list.length} competitors · ${platform === "ios" ? "App Store" : "Google Play"}`;
+  $("#result-count").textContent =
+    `${list.length} game${list.length === 1 ? "" : "s"} · ${platform === "ios" ? "App Store" : "Google Play"}`;
 
   gridEl.innerHTML = list.map(card).join("");
   gridEl.querySelectorAll(".card").forEach((el, i) => {
