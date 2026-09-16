@@ -52,6 +52,9 @@ async function scout() {
     const data = await res.json();
     if (!res.ok) throw new Error((data.error || "Request failed") + (data.detail ? " — " + data.detail : ""));
     current = data;
+    await loadVelocities();
+    applyVelocity(current.seed);
+    (current.competitors || []).forEach(applyVelocity);
     render();
     hydrate();
   } catch (err) {
@@ -159,16 +162,51 @@ function card(a) {
 function pickMetrics(a) {
   const defs = [
     ["Installs", a.installsNum != null ? fmtNum(a.installsNum) : a.installsLabel],
-    ["Dwnld / day", a.downloadsDaily != null ? fmtNum(a.downloadsDaily) : null],
+    ["Dwnld / day", dwnld(a.measuredDaily, a.downloadsDaily)],
     ["Released", fmtAge(a.ageDays)],
     ["Updated", fmtAge(daysSinceISO(a.updated))],
     ["Revenue / mo", a.revenueMonth != null ? fmtMoney(a.revenueMonth) : null],
-    ["Dwnld / mo", a.downloadsMonth != null ? fmtNum(a.downloadsMonth) : null],
+    ["Dwnld / mo", dwnld(a.measuredMonth, a.downloadsMonth)],
     ["Rating", a.rating != null ? fmtRating(a.rating) : null],
     ["Reviews", a.reviewCount != null ? fmtNum(a.reviewCount) : null],
   ];
   const shown = defs.filter((d) => d[1] != null && d[1] !== "" && d[1] !== "—").slice(0, 8);
   return shown.length ? shown : [["Installs", "—"], ["Rating", "—"]];
+}
+
+// A measured number always wins over a modelled one.
+function dwnld(measured, modelled) {
+  if (measured != null) return fmtNum(measured);
+  return modelled != null ? fmtNum(modelled) : null;
+}
+
+// ---------- measured download velocity ----------
+//
+// public/installs.json is written once a day by the track-installs workflow:
+// the gap between two days of Google's own cumulative install count. That is
+// a real download rate, not an estimate, so it takes precedence on the card.
+// Fetched once per session; an empty or missing file just means the tracker
+// hasn't collected two days yet.
+let velocities = null;
+
+async function loadVelocities() {
+  if (velocities) return velocities;
+  try {
+    const res = await fetch("installs.json", { cache: "no-cache" });
+    velocities = res.ok ? await res.json() : {};
+  } catch {
+    velocities = {};
+  }
+  return velocities;
+}
+
+function applyVelocity(a) {
+  if (!a || !velocities) return;
+  const v = velocities[a.bundle] || velocities[a.appId];
+  if (!v) return;
+  a.measuredDaily = v.perDay;
+  a.measuredMonth = v.perMonth;
+  a.measuredDays = v.days;
 }
 
 // Compact ages, the way a store listing reads them: 6y, 8mo, 12d.
@@ -205,8 +243,10 @@ function openDrawer(a) {
     </div>
 
     <div class="dw-stats">${drawerStats(a)}</div>
-    ${a.downloadsMonth == null && current && current.source === "free"
-      ? `<p class="dw-text" style="opacity:.55">Download and revenue estimates aren't published by the stores — they're modelled data, and need an AppstoreSpy subscription.</p>`
+    ${a.measuredDaily != null
+      ? `<p class="dw-text" style="opacity:.55">Downloads measured from ${a.measuredDays} day${a.measuredDays === 1 ? "" : "s"} of this game's own install count — not an estimate.</p>`
+      : a.downloadsMonth == null && current && current.source === "free"
+      ? `<p class="dw-text" style="opacity:.55">The stores publish total installs but never the rate. Downloads appear here once the tracker has two days of counts for this game; revenue needs an AppstoreSpy subscription.</p>`
       : ""}
 
     <div class="dw-facts">
