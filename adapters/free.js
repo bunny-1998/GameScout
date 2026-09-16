@@ -263,6 +263,8 @@ function normalizePlay(a, isSeed = false, full = false) {
     ageDays: daysSince(a.released),
 
     iap: !!a.offersIAP,
+    // Play publishes the real in-app price band, e.g. "$0.99 - $99.99 per item"
+    iapRange: a.IAPRange || "",
     advertised: !!a.adSupported,
     country: "",
     seller: a.developer || "",
@@ -307,6 +309,7 @@ function normalizeIos(a, isSeed = false, full = true) {
     ageDays: daysSince(a.released),
 
     iap: false,
+    iapRange: "",
     advertised: false,
     country: "",
     seller: a.developer || "",
