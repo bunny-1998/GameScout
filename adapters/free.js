@@ -385,26 +385,33 @@ async function scoutAndroid({ game, max, deadline }) {
     .map((x) => ({ raw: x, score: relevance(x, wantWords, seedGenres) }));
 
   const kept = scored.filter((r) => r.score > 0);
-  const competitors = (kept.length >= 5 ? kept : scored)
+  const ranked = (kept.length >= 5 ? kept : scored)
     .sort((a, b) => b.score - a.score)
-    .slice(0, max)
-    .map((r) => normalizePlay(r.raw, false, false));
+    .slice(0, Math.min(max * 3, 500));
 
-  // Enrich the first screenful here so the page looks complete immediately;
-  // the dashboard hydrates the rest through fetchDetails().
-  const head = competitors.slice(0, EAGER);
-  await mapLimit(head, 5, deadline, async (c) => {
-    const full = await gplay.app({ appId: c.appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
-    Object.assign(c, normalizePlay(full, false, true));
+  // A Play search result carries no category whatsoever, so a candidate is
+  // only known to be a game once its full record is read. Rather than paint
+  // cards and snatch them back a second later, NOTHING goes out unverified:
+  // this fetches the first screenful now and hands the rest over as bare ids
+  // for the browser to check and append as they clear. The grid only ever
+  // grows, and never shows an app.
+  const order = new Map(ranked.map((r, i) => [r.raw.appId, i]));
+  const competitors = [];
+
+  await mapLimit(ranked.slice(0, EAGER).map((r) => r.raw.appId), 5, deadline, async (appId) => {
+    const full = await gplay.app({ appId, country: COUNTRY, lang: LANG, throttle: THROTTLE });
+    if (gamesOnly && !isGameRecord(full)) return;   // an ordinary app - never rendered
+    competitors.push(normalizePlay(full, false, true));
   });
+  competitors.sort((a, b) => (order.get(a.appId) ?? 1e9) - (order.get(b.appId) ?? 1e9));
 
-  await rankInOwnCategory([seed, ...head], "android", 2);
+  await rankInOwnCategory([seed, ...competitors], "android", 2);
 
-  // Whatever the detail fetch just proved is an ordinary app goes now; the
-  // rest are checked the same way as hydration reaches them.
   return {
     seed,
-    competitors: gamesOnly ? competitors.filter((c) => c.categoryType !== "APP") : competitors,
+    competitors,
+    pending: ranked.slice(EAGER).map((r) => r.raw.appId),
+    max,
     gamesOnly,
   };
 }
@@ -460,8 +467,10 @@ async function scoutIos({ game, max }) {
     .slice(0, max)
     .map((r) => normalizeIos(r.raw, false));
 
+  // Apple hands back the genre with every record, so this list is already
+  // games-only and complete - nothing left for the browser to verify.
   await rankInOwnCategory([seed, ...competitors], "ios", 3);
-  return { seed, competitors, gamesOnly };
+  return { seed, competitors, pending: [], max, gamesOnly };
 }
 
 // ------------------------------------------------- per-batch detail filling
