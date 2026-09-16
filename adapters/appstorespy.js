@@ -165,6 +165,59 @@ function normalize(a, platform, isSeed = false) {
   };
 }
 
+// ---------------------------------------------------------------- estimates
+//
+// Downloads and revenue are the three figures the public stores never publish,
+// so a free-mode search can't fill them in. This pulls them for a whole search
+// in a handful of BULK calls - the same name-filtered query the full adapter
+// pages through - rather than one call per game, so topping up 200 cards costs
+// about six credits instead of two hundred.
+//
+// Keyed by both bundle and id, because the free adapters key Android results
+// on the package name and iOS results on the numeric store id.
+export async function estimates({ query, platform, max = 250 }) {
+  if (!KEY) return new Map();
+
+  const isIos = platform === "ios";
+  const queryPath = isIos ? "/ios/apps/query" : "/play/apps/query";
+  const fields = isIos
+    ? ["id", "bundle", "name", "downloads_month", "revenue_month"]
+    : ["id", "bundle", "name", "downloads_month", "downloads_daily", "ipd", "revenue_month"];
+
+  // A long store title matches almost nothing, so search on its keyword.
+  const name = keywordFrom(query);
+  const out = new Map();
+  const PAGE = 50;
+
+  for (let page = 1; page <= 6 && out.size < max; page++) {
+    const resp = await api("POST", queryPath, {
+      body: {
+        limit: PAGE,
+        page,
+        sort: isIos ? "-downloads_month" : "-downloads_mark",
+        country: COUNTRY,
+        language: LANG,
+        fields,
+        filter: { published: true, name, category_type: "GAME" },
+      },
+    });
+    const data = resp.data || [];
+    for (const a of data) {
+      const est = {
+        downloadsMonth: num(a.downloads_month),
+        downloadsDaily: num(a.downloads_daily) ?? num(a.ipd),
+        revenueMonth: num(a.revenue_month),
+      };
+      // nothing worth merging if all three came back empty
+      if (est.downloadsMonth == null && est.downloadsDaily == null && est.revenueMonth == null) continue;
+      if (a.bundle) out.set(String(a.bundle), est);
+      if (a.id) out.set(String(a.id), est);
+    }
+    if (data.length < PAGE) break;
+  }
+  return out;
+}
+
 export default async function scout({ game, platform, min, max }) {
   const isIos = platform === "ios";
   const appsPath = isIos ? "/ios/apps" : "/play/apps";
