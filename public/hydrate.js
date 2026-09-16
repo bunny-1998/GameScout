@@ -70,6 +70,7 @@ function mergeApp(d) {
   // blank the very stats we paid credits for.
   const est = current.estimates && (current.estimates[a.bundle] || current.estimates[a.appId]);
   if (est) Object.assign(a, est);
+  applyVelocity(a);   // and the measured numbers, same reason
 
   if (d.rank == null && keptRank != null) a.rank = keptRank;  // don't lose a rank we had
   patchCard(a);
