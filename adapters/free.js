@@ -384,9 +384,18 @@ async function scoutAndroid({ game, max, deadline }) {
     .filter((x) => !gamesOnly || !looksLikeApp(x))
     .map((x) => ({ raw: x, score: relevance(x, wantWords, seedGenres) }));
 
-  const kept = scored.filter((r) => r.score > 0);
-  const ranked = (kept.length >= 5 ? kept : scored)
-    .sort((a, b) => b.score - a.score)
+  // Two tiers, in this order:
+  //   1. anything whose title or sub-genre matches what was typed
+  //   2. every other game in the seed's own category chart
+  // Tier 2 matters: Play's search caps out at about 30 results per term no
+  // matter what you ask for, while the category chart hands over a full 200.
+  // Those chart entries arrive as bare ids with no title, so they score zero
+  // and used to be thrown away - which is why a 200-slider only ever filled
+  // to about 50. They are known games in the right category, so they belong
+  // in the list; their titles and stats arrive with the detail fetch.
+  const kept = scored.filter((r) => r.score > 0).sort((a, b) => b.score - a.score);
+  const keptIds = new Set(kept.map((r) => r.raw.appId));
+  const ranked = [...kept, ...scored.filter((r) => !keptIds.has(r.raw.appId))]
     .slice(0, Math.min(max * 3, 500));
 
   // A Play search result carries no category whatsoever, so a candidate is
