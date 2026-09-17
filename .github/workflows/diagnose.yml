@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - run: npm install --omit=dev
+
       - run: node scripts/diagnose.mjs
         env:
           DIAG_GAME: ${{ inputs.game }}
