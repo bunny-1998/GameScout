@@ -63,7 +63,10 @@ app.use(express.json({ limit: "1mb" }));
 
 // Serve the dashboard (the browser only ever talks to THIS server, never to
 // the data provider directly - so your API key never leaves the machine).
-app.use(express.static(PUBLIC_DIR));
+// Revalidate on every load. Without this a browser can sit on a cached
+// app.js/hydrate.js for days, and a stale pair against a new server response
+// silently does nothing - which is exactly how a search once stopped at 12.
+app.use(express.static(PUBLIC_DIR, { etag: true, lastModified: true, maxAge: 0 }));
 
 // Pick the data source. Each adapter exposes the same scout() function so the
 // rest of the app doesn't care which provider is behind it.
