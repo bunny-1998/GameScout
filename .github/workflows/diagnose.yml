@@ -1,0 +1,22 @@
+name: Diagnose search
+
+on:
+  workflow_dispatch:
+    inputs:
+      game:
+        description: "Game name or bundle id to test"
+        default: "ball connect"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/diagnose.mjs
+        env:
+          DIAG_GAME: ${{ inputs.game }}
+
